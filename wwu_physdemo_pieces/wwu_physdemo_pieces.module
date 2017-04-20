@@ -1,0 +1,7 @@
+<?php
+/**
+ * @file
+ * Code for the WWU PhysDemo Pieces feature.
+ */
+
+include_once 'wwu_physdemo_pieces.features.inc';

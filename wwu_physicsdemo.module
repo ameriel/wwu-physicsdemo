@@ -1,0 +1,626 @@
+<?php
+
+/**
+ * @file
+ * A helper module for WWU's Physics Department that implements scheduling functionality for
+ * classroom demonstrations via Webform.
+ */
+
+/**
+ * Implements hook_webform_validation_validators().
+ * Provides information about available custom validators.
+ */
+
+function wwu_physicsdemo_webform_validation_validators() {
+  return array(
+    'check_reservation' => array(
+      'name' => t("Check reservation times"),
+      'component_types' => array(
+        'date', 'time', 'textfield',
+      ),
+      'custom_error' => TRUE,
+      'description' => t('Checks that the requested demonstration is free on the requested date.'),
+    ),
+    'check_date_range' => array (
+       'name' => t("Compare times"),
+       'component_types' => array('time','date'),
+       'custom_error' => TRUE,
+       'description' => t('Checks that first time component is chronologically before second.'),
+    ),
+    'comments_if_custom' => array (
+       'name' => t("Require comments if custom demonstration"),
+       'component_types' => array('textfield', 'textarea'),
+       'custom_error' => TRUE,
+       'description' => t('Makes a textarea required if a given textfield does not match the name of an existing demonstration.'),
+    ),
+	'time_within_range' => array(
+		'name' => t("Time Within Range"),
+		'component_types' => array('time'),
+		'custom_error' => TRUE,
+		'description' => t('Check if time component is within two given values'),
+		'custom_data' => array(
+          'label' => t('Min and Max Times'),
+          'description' => t('Enter two times separated by a space.'),
+        ),
+	),
+  );
+}
+ 
+ /**
+ * Implements hook_webform_validation_validate().
+ * Provides logic for custom validators.
+ */
+function wwu_physicsdemo_webform_validation_validate($validator_name, $items, $components, $rule) {
+  if ($items) {
+    $errors = array();
+    switch ($validator_name) {
+	
+	  case 'time_within_range':
+	    //Get values from rule config
+		$data = explode(' ', $rule['data']);
+		if (count($data) == 2) {
+		  $limits = array();
+		  $date = date('Y-m-d');
+		  foreach($data as $key => $limit) {
+			 $limits[$key] = new DateTime ($date . ' ' . $limit, new DateTimeZone(date_default_timezone_get()));
+		  }
+		  //Get component values
+	      $times = array();
+		  foreach ($items as $key => $val) {
+            if ($components[$key]['type'] == "time") {
+			  $minute = strlen($val['minute']) < 2 ? '0'.$val['minute'] : $val['minute'];
+			  $times[$key] = $val['hour'].':'.$minute.' '.$val['ampm'];
+            }
+          }
+		  //Compare component values to config values
+		  foreach($times as $key => $time) {
+			  $time_obj = new DateTime($date . ' ' . $time, new DateTimeZone(date_default_timezone_get()));
+			  $time_ts = $time_obj->format('U');
+			  $start_ts = $limits[0]->format('U');
+			  $end_ts = $limits[1] -> format('U');
+			  if ($time_ts < $start_ts || $time_ts > $end_ts) {
+				$test = True; //time falls outside allowed range
+			    _webform_validation_test($errors, $key, $rule, $test);
+			  }
+		  }
+		}
+		return($errors);
+		break;
+      case 'check_date_range':
+        $date = "";
+        $start_time = "";
+        $end_time = "";
+        $timezone = date_default_timezone_get();
+        // Get submitted values
+        foreach ($items as $key => $val) {
+          if ($components[$key]['type'] == "date") {
+            $date = $val;
+            $date = $date['year'].'-'.$date['month'].'-'.$date['day'];
+            $date_key = $key;
+          } elseif ($components[$key]['type'] == "time") {
+            $minute = strlen($val['minute']) < 2 ? '0'.$val['minute'] : $val['minute'];
+            $time = $val['hour'].':'.$minute.' '.$val['ampm'];
+            $time_key = $key;
+            if(strpos($components[$key]['form_key'], 'start') !== false) {
+              $start_time = $time;
+              $start_time_key = $time_key;
+            } else {
+              $end_time = $time;
+              $end_time_key = $time_key;
+            }
+          }
+        }
+        // Convert to timestamps and check
+        $start_date = _wwu_physicsdemo_get_timestamp($date . ' ' . $start_time, $timezone);
+        $end_date = _wwu_physicsdemo_get_timestamp($date . ' ' . $end_time, $timezone);
+        if ($start_date < time() || $start_date >= $end_date) {
+          $test = true; //start is in past or end is before start
+          _webform_validation_test($errors, $start_time_key, $rule, $test);
+        }
+        return $errors;
+      break;
+
+      case 'comments_if_custom':
+        $node_title = "";
+        $comments = "";
+        foreach ($items as $key => $val) {
+          if ($components[$key]['type'] == 'textfield') {
+            $node_title = $val;
+          } elseif ($components[$key]['type'] == 'textarea') {
+            $comments = $val;
+            $comments_key = $key;
+          }
+        }
+        if (_wwu_physicsdemo_is_custom($node_title) && empty($comments)) {
+          $test = true; //comments is empty
+          _webform_validation_test($errors, $comments_key, $rule, $test);
+        }
+        return $errors;
+      break;
+
+      case 'check_reservation':
+        $node_title = "";
+        $date = "";
+        $start_time = "";
+        $end_time = "";
+        $timezone = date_default_timezone_get(); //Default value
+
+        //Get values for title, date, and two times
+        foreach ($items as $key => $val) {
+          if ($components[$key]['type'] == 'textfield') {
+            $node_title = $val;
+            $title_key = $key;
+          } elseif ($components[$key]['type'] == 'date') {
+            $date = $val;
+            $date = $date['year'].'-'.$date['month'].'-'.$date['day'];
+            $date_key = $key;
+          } elseif ($components[$key]['type'] == 'time') {
+            $minute = strlen($val['minute']) < 2 ? '0'.$val['minute'] : $val['minute'];
+            $time = $val['hour'].':'.$minute.' '.$val['ampm'];
+            $time_key = $key;
+            if(strpos($components[$key]['form_key'], 'start') !== false) {
+              $start_time = $time;
+              $start_time_key = $time_key;
+            } else {
+              $end_time = $time;
+              $end_time_key = $time_key;
+            }
+          }
+        }
+
+        //Check for reservation conflicts if not custom
+        if (!_wwu_physicsdemo_is_custom($node_title)) {
+          $start_date = _wwu_physicsdemo_get_timestamp($date . ' ' . $start_time, $timezone);
+          $end_date = _wwu_physicsdemo_get_timestamp($date . ' ' . $end_time, $timezone);
+          $nid = _wwu_physicsdemo_get_demo_nid_from_title($node_title);
+
+          //Get field_reserved_dates from retrieved node
+          $node = node_load($nid);
+          $wrapper = entity_metadata_wrapper('node', $node); //Access field collection fields without loading another entity
+          $fc_items = $wrapper->field_reserved_dates;
+          $reserved_dates = array();
+
+          //Loop through existing reservations
+          foreach ($fc_items as $item) {
+            $db_timezone = $item->field_date->value()['timezone_db'];
+            $timezone = $item->field_date->value()['timezone'];
+            $item_start_date = _wwu_physicsdemo_get_timestamp($item->field_date->value()['value'], $db_timezone, $timezone);
+            $item_end_date = _wwu_physicsdemo_get_timestamp($item->field_date->value()['value2'], $db_timezone, $timezone);
+            if ($item_end_date > time()) {
+              //Check for conflict in future only
+              if (($start_date >= $item_start_date && $start_date < $item_end_date) || 
+			      ($end_date > $item_start_date && $end_date <= $item_end_date) ||
+				  ($start_date < $item_start_date && $end_date > $item_start_date)) {
+                $test = true; //The requested reservation conflicts with an existing reservation
+                _webform_validation_test($errors, $start_time_key, $rule, $test);
+              }
+            }
+          } 
+        }
+        return $errors;
+      break;
+    }
+  }
+}
+
+ /**
+ * Implements hook_webform_submission_presave().
+ * Fires after form has been validated and before submission is saved.
+ * Reservation form: Add submitted data to field collection on specified demonstration.
+ * Cancelation form: Check that user made reservation and delete field collection item.
+ */
+function wwu_physicsdemo_webform_submission_presave($node, &$submission) {
+	/* RESERVATION FORM */
+	if (strpos($node->title, "Demonstration Reservation Form") !== false) {
+		$node_title = "";
+		$location = "";
+		$date = "";
+		$start_tine = "";
+		$end_time = "";
+		$timezone = date_default_timezone_get();
+		$db_timezone = 'UTC';
+		$course = "";
+		$quarter = "";
+
+		//Get values from submission
+		foreach($submission->data as $id => $component) {
+			$key = $node->webform['components'][$id]['form_key'];
+			$type = $node->webform['components'][$id]['type'];
+			$val = $component[0];
+			if ($type == 'textfield') {
+				if (strpos($key, 'location') !== false || (strpos($key, 'room') !== false)) {
+					$location = $val;
+				} elseif (strpos($key, 'course') !== false) {
+					$course = strtoupper($val);
+				} else {
+					$node_title = $val;
+				}
+			} elseif ($type == 'date') {
+				$date = $val;
+ 			} elseif ($type == 'time') {
+				if(strpos($key, 'start') !== false) {
+					$start_time = $val;
+				} else {
+					$end_time = $val;
+				}
+			} elseif ($type == 'textarea') {
+				$comments = $val;
+			}
+		}
+		$start_date = $date . ' ' . $start_time;
+		$end_date = $date . ' ' . $end_time;
+		$demo_nid = _wwu_physicsdemo_get_demo_nid_from_title($node_title);
+		$demonstration = node_load($demo_nid);
+
+		//Update reserved dates field
+		date_default_timezone_set($timezone);
+		$start_date_object = new DateTime($start_date, new DateTimeZone($timezone));
+		$end_date_object = new DateTime($end_date, new DateTimeZone($timezone));
+		$start_date_object->setTimezone(new DateTimeZone($db_timezone));
+		$end_date_object->setTimezone(new DateTimeZone($db_timezone));
+		global $user;
+		$values = array(
+			'field_name' => 'field_reserved_dates',
+			'field_date' => array(
+				LANGUAGE_NONE => array(array(
+					'value' => $start_date_object->format('Y-m-d H:i:00'),
+					'value2' => $end_date_object->format('Y-m-d H:i:00'),
+					'timezone' => $timezone,
+					'db_timezone' => $db_timezone,
+				)),
+			),
+			'field_instructor' => array(
+				LANGUAGE_NONE => array(array(
+					'target_id' => $user->uid,
+				)),
+			),
+			'field_location' => array(
+				LANGUAGE_NONE => array(array(
+					'value' => $location,
+				)),
+			),
+			'field_comments' => array(
+				LANGUAGE_NONE => array(array(
+					'value' => $comments,
+				)),
+			),
+			'field_demonstration_name' => array (
+				LANGUAGE_NONE => array(array(
+					'value' => $node_title,
+				)),
+			),
+			'field_course_number' => array (
+				LANGUAGE_NONE => array(array(
+					'value' => $course,
+				)),
+			),
+		);
+		$field_collection_item = entity_create('field_collection_item', $values);
+		$field_collection_item->setHostEntity('node', $demonstration);
+		$field_collection_item->save();
+	}
+	/* CANCELATION FORM */
+	if (strpos($node->title, "Cancel Reservation") !== false) {
+		//Get values from submission
+		$fc_id = "";
+		foreach($submission->data as $id => $component) {
+			$type = $node->webform['components'][$id]['type'];
+			$val = $component[0];
+			if ($type == 'hidden') {
+				$fc_id = $val;
+			}
+		}
+		//Load field collection item
+		$entities = entity_load('field_collection_item', array($fc_id));
+		if (!empty($entities)) { //If some field collection item matches given id
+			$fc = array_pop($entities);
+			$fc_wrapper = entity_metadata_wrapper('field_collection_item', $fc);
+			global $user;
+			$fc_user = $fc_wrapper->field_instructor->value();
+			// Only let users delete reservations that they made unless they are staff or admin
+			if ($user->uid == $fc_user->uid || user_access("edit any demonstration content", $user)) {
+				try {
+					entity_delete('field_collection_item',$fc_id); //Delete field collection item
+					drupal_set_message(t("The reservation has been cancelled."));
+				} catch (Exception $e) {
+					drupal_set_message(t("There was an error and the reservation could not be cancelled."),"error");
+				}
+			} else {
+				drupal_set_message(t("You cannot cancel the reservation because you did not create it."), "error");
+			}
+		} else {
+			drupal_set_message(t("There was an error and a non-existing reservation was specified. Please return to the calendar and try again."),"error");
+		}
+	}
+}
+
+/*
+ * Implements hook_node_load().
+ * Set complex default values in reservation form.
+ */
+function wwu_physicsdemo_node_load($nodes, $types) {
+  $node = $nodes[array_keys($nodes)[0]];
+  $type = $types[array_keys($types)[0]];
+  if ($type == 'webform' && strpos($node->title, "Demonstration Reservation Form") !== false) {
+    //Add JavaScript for generating default end time
+	drupal_add_js(drupal_get_path('module', 'wwu_physicsdemo') . '/script.js', array(
+      'type' => 'file',
+      'group' => JS_DEFAULT,
+	  'scope' => 'footer',
+    ));
+    //Find date component and set default value to monday if it is the weekend
+    foreach ($nodes[array_keys($nodes)[0]]->webform['components'] as &$component){
+	  if ($component['type'] == 'date') {
+        $now = new DateTime("now",new DateTimeZone(date_default_timezone()));
+        $current_day = $now->format('N');
+        if ($current_day > 4) { //If today is Friday, Saturday, or Sunday
+          $offset = 8 - $current_day;
+          $component['value'] = "+".$offset." days";
+        }
+	  }
+    }
+  }
+}
+
+
+/*
+ * HELPER FUNCTIONS
+ */
+
+function _wwu_physicsdemo_get_demo_nid_from_title($title) {
+	$nid = 0;
+	$query = new EntityFieldQuery();
+	$entities = $query->entityCondition('entity_type', 'node')
+		->propertyCondition('type', 'demonstration')
+		->propertyCondition('title', $title)
+		->propertyCondition('status', 1)
+		->range(0,1)
+		->execute();
+	if (empty($entities['node']) || $title == 'Custom Demonstration') {
+		$query = new EntityFieldQuery();
+		$entities = $query->entityCondition('entity_type', 'node')
+			->propertyCondition('type', 'demonstration')
+			->propertyCondition('title', 'Custom Demonstration')
+			->propertyCondition('status', 1)
+			->range(0,1)
+			->execute();
+	}
+	if (!empty($entities['node'])) {
+		$nid = array_keys($entities['node'])[0];
+	}
+	return $nid;
+}
+
+function _wwu_physicsdemo_is_custom($title) {
+	$cnid = _wwu_physicsdemo_get_demo_nid_from_title('Custom Demonstration');
+	$nid = _wwu_physicsdemo_get_demo_nid_from_title($title);
+	return $nid == $cnid;
+}
+
+function _wwu_physicsdemo_get_timestamp($string, $tzs_orig, $tzs_new='America/Los_Angeles') {
+	$tz_orig = new DateTimeZone($tzs_orig);
+	$tz_new = new DateTimeZone($tzs_new);
+	$date = new DateTime($string, $tz_orig);
+	$date->setTimezone($tz_new);
+	return $date->format('U');
+}
+
+/*
+ * CALENDAR THEME FUNCTIONS
+ */
+ function wwu_physicsdemo_preprocess_calendar_day(&$vars) {
+  $start_times = $vars['view']->date_info->style_groupby_times;
+  $items = array();
+  foreach ($start_times as $key => $value) {
+	$item = isset($vars['rows']['items'][$value]) ? $vars['rows']['items'][$value] : array('hour'=>'0', 'ampm'=>'', 'values'=> array('Items'=>array()));
+	$time = new DateTime($vars['rows']['date'] . ' ' . $value, new DateTimeZone('UTC'));
+	$time->setTimezone(new DateTimeZone(date_default_timezone_get()));
+	$time = $time->format("H:i:s");
+	$hour = substr($time, 0 , 2) + 0;
+	$ampm = 'AM';
+	if ($hour > 11) {
+		$ampm = 'PM';
+		$hour -= 12;
+	}
+	if ($hour == 0) {
+		$hour = 12;
+	}
+	$item['hour'] = $hour;
+	$item['ampm'] = $ampm;
+	$items[$time] = $item;
+  }
+  ksort($items);
+  $vars['rows']['items'] = $items;
+}
+
+function wwu_physicsdemo_preprocess_calendar_week(&$vars) {
+  $vars['view']->style_with_weekno = FALSE;
+  $view = $vars['view'];
+  $rows = $vars['rows'];
+  $item_count = 0;
+  $by_hour_count = 0;
+  $start_time = NULL;
+  $columns = array();
+
+  if (sizeof($rows) > 1) {
+    $day_names = array_shift($rows);
+  }
+  else {
+    $day_names = $rows;
+    $rows = array();
+  }
+  $end_start_time = '23:59:59';
+
+  $grouped_items = array();
+
+  // pass the multiday buckets
+  $vars['all_day'] = $rows['multiday_buckets'];
+
+  // Remove the count for singleday
+  $vars['multiday_rows'] = max(0, $rows['total_rows'] - 1);
+  $display_overlap = ($view->date_info->style_multiday_theme == '1' && !empty($view->date_info->style_theme_style));
+  $vars['display_overlap'] = $display_overlap;
+  $vars['scroll_content'] = !empty($view->date_info->style_theme_style) && $view->date_info->style_theme_style == 1;
+
+  // Add optional css
+  if ($display_overlap) {
+    drupal_add_css(drupal_get_path('module', 'calendar') . '/css/calendar-overlap.css');
+    if (empty($view->live_preview) && !empty($vars['scroll_content'])) {
+      drupal_add_js(drupal_get_path('module', 'calendar') . '/js/calendar_overlap.js');
+    }
+    if (empty($vars['scroll_content'])) {
+      drupal_add_css(drupal_get_path('module', 'calendar') . '/css/calendar-overlap-no-scroll.css');
+    }
+    $overlapped_items = array( array(), array(), array(), array(), array(), array(), array());
+
+    // Locate the first item
+    $first_time = '23:59:59';
+    $first_time_index = -1;
+    for ($i = 0; $i < 7; $i++) {
+      if (count($rows['singleday_buckets'][$i]) > 0) {
+        $time_slot = reset($rows['singleday_buckets'][$i]);
+		$time = new DateTime(date_format($time_slot[0]['item']->date_start, 'Y-m-d H:i:s'), new DateTimeZone('UTC'));
+		$time->setTimezone(new DateTimezone(date_default_timezone()));
+		$time = $time->format('H:i:s');
+        if ($time < $first_time) {
+          $first_time = $time;
+          $first_time_index = $i;
+        }
+      }
+    }
+    if ($first_time_index > -1) {
+      $rows['singleday_buckets'][$first_time_index][$first_time][0]['is_first'] = TRUE;
+    }
+  }
+
+  // If we're not grouping by time, move all items into the 'all day' array.
+  if (empty($view->date_info->style_groupby_times)) {
+    $add_row = FALSE;
+    foreach ($vars['all_day'] as $index => &$day ) {
+      foreach ($rows['singleday_buckets'][$index] as $item) {
+        foreach ($item as $event) {
+          $day[] = $event;
+          $add_row = TRUE;
+        }
+      }
+    }
+    if ( $add_row ) {
+      $vars['multiday_rows']++;
+    }
+  }
+  else {
+    foreach ($rows['singleday_buckets'] as $wday => $singleday_row) {
+      $columns[] = $wday;
+      foreach ($singleday_row as &$row) {
+        $start_times = $view->date_info->style_groupby_times;
+        $start_time = array_shift($start_times);
+        $next_start_time = count($start_times) ? array_shift($start_times) : $end_start_time;
+        foreach ($row as &$item) {
+		  $time = new DateTime(date_format($item['item']->date_start, 'Y-m-d H:i:s'), new DateTimeZone('UTC'));
+		  $time->setTimezone(new DateTimezone(date_default_timezone()));
+		  $time = $time->format('H:i:s');
+          if ($item['item']->calendar_all_day) {
+            $vars['all_day'][$item['wday']][] = $item;
+            if ($vars['multiday_rows'] == 0) {
+              $vars['multiday_rows']++;
+            }
+          }
+          else {
+            // Find the next time slot and fill it. Populate the skipped
+            // slots if the option to show empty times was chosen.
+            while ($time >= $next_start_time && $time < $end_start_time) {
+              $grouped_items[$start_time]['values'][$wday] = array();
+              $start_time = $next_start_time;
+              $next_start_time = count($start_times) ? array_shift($start_times) : $end_start_time;
+            }
+            $grouped_items[$start_time]['values'][$wday][] = &$item;
+            if ($display_overlap) {
+              $date_end = date_format($item['item']->date_end, 'H:i:s');
+              _calc_indents($overlapped_items[$wday], $time, $date_end, $item);
+            }
+            $item_count++;
+            $by_hour_count++;
+          }
+        }
+      }
+      // Finish out the day's time values if we want to see empty times.
+      while ($start_time < $end_start_time && ($start_time != NULL || $display_overlap)) {
+        if ($start_time == NULL) {
+          $start_times = $view->date_info->style_groupby_times;
+          $start_time = array_shift($start_times);
+          $next_start_time = array_shift($start_times);
+        }
+        if (!array_key_exists($start_time, $grouped_items)) {
+          $grouped_items[$start_time]['values'][$wday] = array();
+        }
+        $start_time = $next_start_time;
+        $next_start_time = count($start_times) ? array_shift($start_times) : $end_start_time;
+      }
+      ksort($grouped_items);
+    }
+  }
+
+  // Do the headers last, once we know what the actual values are.
+  $i = 0;
+  $start_times = array_keys($grouped_items);
+  foreach ($start_times as $start_time) {
+	$hour = substr($start_time, 0, 2) + 0;
+	$ampm = "AM";
+	if ($hour > 11) {
+		$ampm = "PM";
+		$hour -= 12;
+	}
+	if ($hour == 0) {
+		$hour = 12;
+	}
+    //$heading = theme('calendar_time_row_heading', $variables);
+    $grouped_items[$start_time]['hour'] = $hour;
+    $grouped_items[$start_time]['ampm'] = $ampm;
+    $grouped_items[$start_time]['time'] = $start_time;
+    if ($display_overlap) {
+      foreach ($grouped_items[$start_time]['values'] as $wday => &$items) {
+        foreach ($items as &$item) {
+          if ($display_overlap) {
+            $group_time = NULL;
+            $divisor = NULL;
+            if ($view->style_options['groupby_times'] == 'half'){
+              $group_time = 30;
+              $divisor = 7.5;
+            }
+            elseif ($view->style_options['groupby_times'] == 'hour'){
+              $group_time = 60;
+              $divisor = 15;
+            }
+            else {
+              $item['class'] = '';
+            }
+            if (!empty($group_time) && !empty($divisor)) {
+              $start_minute = intval(substr($start_time, 3, 2));
+              $offset = round((date_format($item['item']->date_start, 'i') - $start_minute) / $divisor);
+              $duration = round(($item['item']->date_end->format('U') - $item['item']->date_start->format('U')) / 60 / $divisor);
+              $item['class'] = 'd_' . $duration . ' o_' . $offset . ' i_' . $item['indent'] . ' md_' . min($item['max_depth'], 5);
+            }
+          }
+        }
+      }
+    }
+  }
+
+  $vars['items'] = $grouped_items;
+
+  $vars['day_names'] = $day_names;
+  $vars['columns'] = $columns;
+  $vars['start_times'] = $view->date_info->style_groupby_times;
+  $vars['first_time'] = !empty($first_time) ? $first_time : '';
+
+  $vars['agenda_hour_class'] = 'calendar-agenda-hour';
+  $first_column_width = 10;
+
+  if (empty($view->date_info->style_groupby_times)) {
+    $vars['agenda_hour_class'] .= ' calendar-agenda-no-hours';
+    $first_column_width = 1;
+  }
+  $vars['item_count'] = $item_count;
+  $vars['by_hour_count'] = $by_hour_count;
+  return;
+}

@@ -1,0 +1,6 @@
+name = WWU Physics Demonstration Scheduler
+description = Implements webform validation hook for scheduling physics demonstrations.
+package = WWU Modules
+core = 7.x
+dependencies[] = webform_validation
+files[] = wwu_physicsdemo.module
